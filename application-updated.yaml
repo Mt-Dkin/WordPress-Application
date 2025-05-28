@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Full WordPress Stack with ALB, ASG, RDS, S3, and Security Groups
+
+Parameters:
+  VPCId:
+    Type: String
+  PublicSubnet1:
+    Type: String
+  PublicSubnet2:
+    Type: String
+  PrivateSubnet1:
+    Type: String
+  PrivateSubnet2:
+    Type: String
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  AmiId:
+    Description: Amazon Linux 2 AMI ID
+    Type: AWS::EC2::Image::Id
+    Default: ami-0c02fb55956c7d316
+
+Resources:
+
+  # Security Groups
+
+  PHPcfSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from ALB and SSH from Bastion
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastioncfSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBcfSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  DBcfSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL from PHP and AMI instances
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AMIcfSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref PHPcfSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ALBcfSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from the internet
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  AMIcfSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and SSH from specific sources
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 103.51.113.45/32
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  BastioncfSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH from your IP
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 103.51.113.45/32
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Target Group
+  ALBcfTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPCId
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+      HealthCheckPath: /healthcheck.html
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+
+  # Load Balancer
+  WordPressLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBcfSecurityGroup
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBcfTargetGroup
+      LoadBalancerArn: !Ref WordPressLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Launch Template
+  PHPLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: t2.micro
+        Placement:
+          AvailabilityZone: us-east-1b
+        KeyName: !Ref KeyName
+        IamInstanceProfile:
+          Name: LabInstanceProfile
+        ImageId: !Ref AmiId
+        SecurityGroupIds:
+          - !Ref PHPcfSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            amazon-linux-extras enable php8.0
+            yum clean metadata
+            yum install -y php php-mbstring php-xml php-mysqlnd httpd mariadb
+            wget https://wordpress.org/latest.tar.gz -P /tmp/
+            tar -xzf /tmp/latest.tar.gz -C /tmp/
+            cp -r /tmp/wordpress/* /var/www/html/
+            chown -R apache:apache /var/www/html/
+            chmod -R 755 /var/www/html/
+            systemctl enable httpd
+            systemctl start httpd
+
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet1
+      ImageId: !Ref AmiId
+      SecurityGroupIds:
+        - !Ref BastioncfSecurityGroup
+      Tags:
+        - Key: Name
+          Value: BastionHost
+
+  AMIInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet2
+      ImageId: !Ref AmiId
+      SecurityGroupIds:
+        - !Ref AMIcfSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          amazon-linux-extras enable php8.0
+          yum clean metadata
+          yum install -y php php-mbstring php-xml php-mysqlnd httpd mariadb
+          wget https://wordpress.org/latest.tar.gz -P /tmp/
+          tar -xzf /tmp/latest.tar.gz -C /tmp/
+          cp -r /tmp/wordpress/* /var/www/html/
+          chown -R apache:apache /var/www/html/
+          chmod -R 755 /var/www/html/
+          systemctl enable httpd
+          systemctl start httpd
+      Tags:
+        - Key: Name
+          Value: AMIHostF
+
+  # Auto Scaling Group
+  WordPressASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: '1'
+      MaxSize: '3'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref PHPLaunchTemplate
+        Version: !GetAtt PHPLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref ALBcfTargetGroup
+      Tags:
+        - Key: Name
+          Value: Scaled-PHPcf-Server
+          PropagateAtLaunch: true
+
+  ScalePolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WordPressASG
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50.0
+
+  # S3 Bucket
+  WordPressBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub wordpress-cf-bucket-${AWS::AccountId}-${AWS::Region}
+
+  # RDS Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DB subnet group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  # Primary RDS Instance
+  WordPressDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: wordpress-cf-db
+      AllocatedStorage: 20
+      DBInstanceClass: db.t4g.micro
+      Engine: mysql
+      EngineVersion: 8.0.35
+      MasterUsername: admin
+      MasterUserPassword: f3qDv3vTm9DH5WlbyAzJ
+      DBName: WordPress
+      MultiAZ: true
+      StorageType: gp2
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBcfSecurityGroup
+      StorageEncrypted: true
+      KmsKeyId: alias/aws/rds
+
+  # Read Replica RDS
+  WordPressReadReplica:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      SourceDBInstanceIdentifier: !Ref WordPressDB
+      DBInstanceIdentifier: wordpress-cf-replica
+      DBInstanceClass: db.t4g.micro
+      AvailabilityZone: us-east-1b
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      KmsKeyId: alias/aws/rds
+      MultiAZ: false
+      VPCSecurityGroups:
+        - !Ref DBcfSecurityGroup
