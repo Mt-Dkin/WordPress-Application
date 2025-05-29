@@ -1,0 +1,12 @@
+#!/bin/bash
+yum update -y
+amazon-linux-extras enable php8.0
+yum clean metadata
+yum install -y php php-mbstring php-xml php-mysqlnd httpd mariadb
+wget https://wordpress.org/latest.tar.gz -P /tmp/
+tar -xzf /tmp/latest.tar.gz -C /tmp/
+cp -r /tmp/wordpress/* /var/www/html/
+chown -R apache:apache /var/www/html/
+chmod -R 755 /var/www/html/
+systemctl enable httpd
+systemctl start httpd
